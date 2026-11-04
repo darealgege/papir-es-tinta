@@ -15,7 +15,8 @@ A [kiadásoknál](../../releases/latest) található a `VonalasFuzet.exe` és a 
 
 - A füzet csukva indul. A címke két sorát átírhatod. A borító színes részére kattintva a füzet az utoljára használt oldalpárnál nyílik ki.
 - A külső lapszélekre kattintva animációval lapozhatsz. Az első oldalpár bal széle visszavisz a borítóra. Alul külön lapozó és **Becsukás** gomb is van.
-- **Gépelés** módban a szöveg a lap vonalaihoz igazodik, és oldalanként választhatsz betűtípust. A **Toll** eszközzel egérrel vagy digitális tollal írhatsz, és egy vonással átrajzolhatsz a füzet gerincén. A **Radír** vonásonként töröl.
+- **Gépelés** módban a szöveg a lap vonalaihoz igazodik. A **Betűtípus** menüben öt kiemelt betűtípus után ábécérendben következnek a Windowsban telepített további betűtípusok. Minden név a saját betűkészletével jelenik meg.
+- A **Tinta** menüben hat színből választhatsz az adott oldal gépelt szövegéhez és az ott kezdett új tollvonásokhoz. A **Toll** eszközzel egérrel vagy digitális tollal írhatsz, akár a gerincen át. A **Radír** vonásonként töröl.
 - A programok automatikusan, egymástól elkülönítve mentik a jegyzeteket, a címkét és az utolsó oldalt. Az **Exportálás** egyetlen fájlba teszi a teljes füzetet. A vonalas változat `.fuzet`, a kockás `.kockasfuzet` fájlt használ. Importáláskor a betöltött füzet megerősítés után a jelenlegi helyére kerül.
 
 ## Fordítás forrásból

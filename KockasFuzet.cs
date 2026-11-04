@@ -21,7 +21,7 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kockás füzet")]
 [assembly: AssemblyDescription("Magyar, lapozható négyzetrácsos füzet")]
 [assembly: AssemblyProduct("Kockás füzet")]
-[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
 
 [DataContract]
 sealed class Notebook
@@ -53,8 +53,9 @@ sealed class Notebook
 sealed class PageData
 {
     [DataMember] public string Text = "";
-    [DataMember] public string Font = "Segoe Print";
+    [DataMember] public string Font = Sheet.DefaultFont;
     [DataMember(EmitDefaultValue = false)] public string Ink;
+    [DataMember(EmitDefaultValue = false)] public string InkColor;
 }
 
 static class Storage
@@ -81,7 +82,8 @@ static class Storage
             foreach (var page in book.Pages)
             {
                 if (page == null || page.Text == null || page.Text.Length > Sheet.MaxText ||
-                    Array.IndexOf(Sheet.Fonts, page.Font) < 0)
+                    string.IsNullOrWhiteSpace(page.Font) || page.Font.Length > 256 ||
+                    page.Font.IndexOfAny(Notebook.LineBreaks) >= 0 || InkPalette.IndexOf(page.InkColor) < 0)
                     throw new InvalidDataException();
                 if (page.Ink != null) ReadInk(page.Ink);
             }
@@ -145,11 +147,36 @@ static class Palette
     }
 }
 
+static class InkPalette
+{
+    public const string DefaultText = "#20395B";
+    const string DefaultPen = "#223F70";
+    public static readonly KeyValuePair<string, string>[] Choices = {
+        new KeyValuePair<string, string>("Tintakék", null),
+        new KeyValuePair<string, string>("Fekete", "#202124"),
+        new KeyValuePair<string, string>("Piros", "#B32736"),
+        new KeyValuePair<string, string>("Zöld", "#216448"),
+        new KeyValuePair<string, string>("Lila", "#6A3E90"),
+        new KeyValuePair<string, string>("Narancs", "#AF5517")
+    };
+
+    public static int IndexOf(string color)
+    {
+        return Array.FindIndex(Choices, choice => choice.Value == color);
+    }
+
+    public static Color PenColor(string color)
+    {
+        return Palette.Color(color ?? DefaultPen);
+    }
+}
+
 sealed class Sheet : Grid
 {
     public const int PageWidth = 420;
     public const int PageHeight = 594;
     public const int MaxText = 4000;
+    public const string DefaultFont = "Segoe Print";
     const int Cell = 14;
     const int GridLeft = 28;
     const int GridTop = 66;
@@ -162,8 +189,33 @@ sealed class Sheet : Grid
     const int EditorTop = 85;
     const int EditorHeight = LineCount * LineStep + 2;
     public static readonly string[] Fonts = {
-        "Segoe Print", "Georgia", "Segoe UI", "Consolas", "Times New Roman"
+        DefaultFont, "Georgia", "Segoe UI", "Consolas", "Times New Roman"
     };
+    static readonly SortedDictionary<string, FontFamily> InstalledFonts = LoadInstalledFonts();
+    public static IEnumerable<string> InstalledFontNames { get { return InstalledFonts.Keys; } }
+    public static FontFamily InstalledFont(string name) { return InstalledFonts[name]; }
+
+    static SortedDictionary<string, FontFamily> LoadInstalledFonts()
+    {
+        var installed = new SortedDictionary<string, FontFamily>(StringComparer.CurrentCultureIgnoreCase);
+        foreach (FontFamily family in System.Windows.Media.Fonts.SystemFontFamilies)
+            installed[family.Source] = family;
+        return installed;
+    }
+
+    static void ApplyFont(FlowDocument document, string name)
+    {
+        FontFamily family;
+        if (!InstalledFonts.TryGetValue(name, out family) && !InstalledFonts.TryGetValue(DefaultFont, out family))
+            family = SystemFonts.MessageFontFamily;
+        document.FontFamily = family;
+        double size = TextSize;
+        var face = new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        GlyphTypeface glyph;
+        if (Array.IndexOf(Fonts, family.Source) < 0 && face.TryGetGlyphTypeface(out glyph) && glyph.Height > 0)
+            size = Math.Min(size, (LineStep + 2) / glyph.Height);
+        document.FontSize = size;
+    }
     static readonly RoutedUICommand[] RichFormatting = {
         EditingCommands.ToggleBold, EditingCommands.ToggleItalic, EditingCommands.ToggleUnderline,
         EditingCommands.ToggleSubscript, EditingCommands.ToggleSuperscript,
@@ -210,7 +262,7 @@ sealed class Sheet : Grid
             VerticalAlignment = VerticalAlignment.Top,
             VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Foreground = Palette.Brush("#20395B"),
+            Foreground = Palette.Brush(InkPalette.DefaultText),
             AcceptsTab = false,
             FontSize = TextSize,
             IsDocumentEnabled = false,
@@ -297,9 +349,11 @@ sealed class Sheet : Grid
             if (lines[i].Length > 0) paragraph.Inlines.Add(new Run(lines[i]));
         }
         var doc = new FlowDocument(paragraph) {
-            PagePadding = new Thickness(0), FontSize = TextSize, FontFamily = new FontFamily(font),
+            PagePadding = new Thickness(0),
+            Foreground = Palette.Brush(Data.InkColor ?? InkPalette.DefaultText),
             LineHeight = LineStep, LineStackingStrategy = LineStackingStrategy.BlockLineHeight
         };
+        ApplyFont(doc, font);
         // Enter and plain-text paste can create further paragraphs.
         var style = new Style(typeof(Paragraph));
         style.Setters.Add(new Setter(Paragraph.MarginProperty, new Thickness(0)));
@@ -332,7 +386,7 @@ sealed class Sheet : Grid
         GlyphTypeface glyph;
         if (!face.TryGetGlyphTypeface(out glyph)) return;
         var margin = Editor.Margin;
-        double top = FirstBaseline - line.Top - glyph.Baseline * TextSize;
+        double top = FirstBaseline - line.Top - glyph.Baseline * Editor.Document.FontSize;
         if (top < EditorTop - 8 || top > EditorTop + 8 || Math.Abs(margin.Top - top) < 0.1) return;
         Editor.Margin = new Thickness(margin.Left, top, margin.Right, 0);
     }
@@ -385,10 +439,10 @@ sealed class Sheet : Grid
     public bool SetFont(string font)
     {
         if (Data.Font == font) return true;
-        Editor.Document.FontFamily = new FontFamily(font);
+        ApplyFont(Editor.Document, font);
         if (!Fits())
         {
-            Editor.Document.FontFamily = new FontFamily(Data.Font);
+            ApplyFont(Editor.Document, Data.Font);
             Editor.ScrollToHome();
             return false;
         }
@@ -401,6 +455,14 @@ sealed class Sheet : Grid
     {
         ink.Strokes = strokes;
         Data.Ink = Storage.WriteInk(strokes);
+    }
+
+    public void SetInkColor(string color)
+    {
+        if (Data.InkColor == color) return;
+        Data.InkColor = color;
+        Editor.Document.Foreground = Palette.Brush(color ?? InkPalette.DefaultText);
+        if (Changed != null) Changed();
     }
 
     public BitmapSource Snapshot()
@@ -557,6 +619,122 @@ sealed class NotebookWindow : Window
         "<Trigger Property='IsEnabled' Value='False'><Setter TargetName='Edge' Property='Opacity' Value='0'/></Trigger>" +
         "</ControlTemplate.Triggers></ControlTemplate>");
 
+    static readonly Brush DropdownBorder = Palette.Brush("#B77562");
+    static readonly ControlTemplate DropdownTemplate = (ControlTemplate)XamlReader.Parse(
+        @"<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+            xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='ComboBox'>
+            <Grid>
+                <ToggleButton Focusable='False' IsTabStop='False' ClickMode='Press'
+                    IsChecked='{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}'>
+                    <ToggleButton.Template>
+                        <ControlTemplate TargetType='ToggleButton'><Border Background='Transparent'/></ControlTemplate>
+                    </ToggleButton.Template>
+                </ToggleButton>
+                <Border x:Name='Frame' IsHitTestVisible='False' CornerRadius='7'
+                    Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}'
+                    BorderThickness='{TemplateBinding BorderThickness}'>
+                    <Grid>
+                        <ContentPresenter Margin='9,0,24,0' VerticalAlignment='Center'
+                            Content='{TemplateBinding SelectionBoxItem}'
+                            ContentTemplate='{TemplateBinding SelectionBoxItemTemplate}'
+                            ContentTemplateSelector='{TemplateBinding ItemTemplateSelector}'/>
+                        <Path Data='M 0,0 L 4,4 8,0' Stroke='{TemplateBinding Foreground}'
+                            StrokeThickness='1.4' HorizontalAlignment='Right' VerticalAlignment='Center'
+                            Margin='0,0,9,0'/>
+                    </Grid>
+                </Border>
+                <Popup x:Name='PART_Popup' Focusable='False' AllowsTransparency='True'
+                    Placement='Bottom' IsOpen='{TemplateBinding IsDropDownOpen}'>
+                    <Border CornerRadius='7' Margin='0,3,0,0' Padding='3'
+                        MinWidth='{TemplateBinding ActualWidth}' MaxHeight='{TemplateBinding MaxDropDownHeight}'
+                        Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}'
+                        BorderThickness='{TemplateBinding BorderThickness}'>
+                        <ScrollViewer CanContentScroll='True' VerticalScrollBarVisibility='Auto'
+                            HorizontalScrollBarVisibility='Disabled'>
+                            <ScrollViewer.Resources>
+                                <Style TargetType='ScrollBar'>
+                                    <Setter Property='Width' Value='10'/>
+                                    <Setter Property='Template'>
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType='ScrollBar'>
+                                                <Track x:Name='PART_Track' IsDirectionReversed='True'>
+                                                    <Track.DecreaseRepeatButton>
+                                                        <RepeatButton Focusable='False' Command='ScrollBar.PageUpCommand'>
+                                                            <RepeatButton.Template>
+                                                                <ControlTemplate TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate>
+                                                            </RepeatButton.Template>
+                                                        </RepeatButton>
+                                                    </Track.DecreaseRepeatButton>
+                                                    <Track.Thumb>
+                                                        <Thumb MinHeight='20'>
+                                                            <Thumb.Template>
+                                                                <ControlTemplate TargetType='Thumb'>
+                                                                    <Border CornerRadius='3' Margin='2,0' Background='#B77562'/>
+                                                                </ControlTemplate>
+                                                            </Thumb.Template>
+                                                        </Thumb>
+                                                    </Track.Thumb>
+                                                    <Track.IncreaseRepeatButton>
+                                                        <RepeatButton Focusable='False' Command='ScrollBar.PageDownCommand'>
+                                                            <RepeatButton.Template>
+                                                                <ControlTemplate TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate>
+                                                            </RepeatButton.Template>
+                                                        </RepeatButton>
+                                                    </Track.IncreaseRepeatButton>
+                                                </Track>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ScrollViewer.Resources>
+                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation='Contained'/>
+                        </ScrollViewer>
+                    </Border>
+                </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+                <Trigger Property='IsMouseOver' Value='True'>
+                    <Setter TargetName='Frame' Property='BorderBrush' Value='#FFAC8C'/>
+                </Trigger>
+                <Trigger Property='IsKeyboardFocusWithin' Value='True'>
+                    <Setter TargetName='Frame' Property='BorderBrush' Value='#FFAC8C'/>
+                </Trigger>
+                <Trigger Property='IsDropDownOpen' Value='True'>
+                    <Setter TargetName='Frame' Property='Background' Value='#A44934'/>
+                </Trigger>
+                <Trigger Property='IsEnabled' Value='False'>
+                    <Setter TargetName='Frame' Property='Opacity' Value='0.5'/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>");
+    static readonly Style DropdownItemStyle = (Style)XamlReader.Parse(
+        @"<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+            xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='ComboBoxItem'>
+            <Setter Property='Foreground' Value='#FFF4E9'/>
+            <Setter Property='Padding' Value='7,4'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='ComboBoxItem'>
+                        <Border x:Name='Row' CornerRadius='4' Background='Transparent' Padding='{TemplateBinding Padding}'>
+                            <ContentPresenter HorizontalAlignment='{TemplateBinding HorizontalContentAlignment}'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsSelected' Value='True'>
+                                <Setter TargetName='Row' Property='Background' Value='#A44934'/>
+                            </Trigger>
+                            <Trigger Property='IsHighlighted' Value='True'>
+                                <Setter TargetName='Row' Property='Background' Value='#B7553B'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>");
+    static readonly ControlTemplate DropdownDivider = (ControlTemplate)XamlReader.Parse(
+        @"<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='Separator'>
+            <Border Height='1' Margin='5,4' Background='{TemplateBinding Background}'/>
+        </ControlTemplate>");
+
     readonly Sheet left = new Sheet(true);
     readonly Sheet right = new Sheet(false);
     readonly Grid bookArea = new Grid { Width = 2 * Sheet.PageWidth, Height = Sheet.PageHeight };
@@ -567,7 +745,10 @@ sealed class NotebookWindow : Window
     readonly TextBlock status = Label("", 12, Muted);
     readonly TextBlock pageCounter = Label("", 13, Cream);
     readonly TextBlock fontCaption = Label("", 11, Muted);
-    readonly ComboBox fonts = new ComboBox { Width = 155, Height = 34, VerticalContentAlignment = VerticalAlignment.Center };
+    readonly ComboBox fonts = MakeDropdown(178);
+    readonly ComboBox inkColors = MakeDropdown(104);
+    readonly Dictionary<string, ComboBoxItem> fontItems = new Dictionary<string, ComboBoxItem>(StringComparer.CurrentCultureIgnoreCase);
+    readonly ComboBoxItem missingFont = new ComboBoxItem { Visibility = Visibility.Collapsed, IsEnabled = false };
     readonly DispatcherTimer autosave = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(650) };
     readonly Button pen;
     readonly Button type;
@@ -593,7 +774,7 @@ sealed class NotebookWindow : Window
     PageTurn flipping;
     EventHandler animation;
     InkCanvasEditingMode mode;
-    bool syncingFont;
+    bool syncingTools;
     bool dirty;
     bool localReadFailed;
     bool isOpen;
@@ -641,8 +822,17 @@ sealed class NotebookWindow : Window
         fontCaption.VerticalAlignment = VerticalAlignment.Center;
         fontCaption.Margin = new Thickness(0, 0, 10, 0);
         fontTools.Children.Add(fontCaption);
+        var installed = new HashSet<string>(Sheet.InstalledFontNames, StringComparer.CurrentCultureIgnoreCase);
         foreach (string font in Sheet.Fonts)
-            fonts.Items.Add(new ComboBoxItem { Content = font, FontFamily = new FontFamily(font) });
+            if (installed.Contains(font)) AddFontItem(font);
+        fonts.Items.Add(new ComboBoxItem {
+            Content = new Separator { Background = DropdownBorder, Template = DropdownDivider },
+            IsEnabled = false, Focusable = false,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(0)
+        });
+        foreach (string font in Sheet.InstalledFontNames)
+            if (!fontItems.ContainsKey(font)) AddFontItem(font);
+        fonts.Items.Add(missingFont);
         fonts.SelectionChanged += FontChanged;
         System.Windows.Automation.AutomationProperties.SetName(fonts, "Betűtípus");
         fontTools.Children.Add(fonts);
@@ -655,6 +845,14 @@ sealed class NotebookWindow : Window
         tools.Children.Add(type);
         tools.Children.Add(pen);
         tools.Children.Add(eraser);
+        var inkCaption = Label("Tinta", 11, Muted);
+        inkCaption.VerticalAlignment = VerticalAlignment.Center;
+        inkCaption.Margin = new Thickness(10, 0, 6, 0);
+        tools.Children.Add(inkCaption);
+        foreach (var choice in InkPalette.Choices) inkColors.Items.Add(InkColorItem(choice));
+        inkColors.SelectionChanged += InkColorChanged;
+        System.Windows.Automation.AutomationProperties.SetName(inkColors, "Tintaszín");
+        tools.Children.Add(inkColors);
         toolbar.Children.Add(tools);
         Grid.SetRow(toolbar, 1);
         layout.Children.Add(toolbar);
@@ -684,7 +882,6 @@ sealed class NotebookWindow : Window
         right.HorizontalAlignment = HorizontalAlignment.Right;
         spread.Children.Add(left);
         spread.Children.Add(right);
-        spreadInk.DefaultDrawingAttributes.Color = Palette.Color("#223F70");
         spreadInk.DefaultDrawingAttributes.Width = spreadInk.DefaultDrawingAttributes.Height = 2.5;
         spreadInk.EditingModeInverted = InkCanvasEditingMode.EraseByStroke;
         spreadInk.PreviewMouseDown += delegate(object sender, MouseButtonEventArgs e) {
@@ -1051,6 +1248,37 @@ sealed class NotebookWindow : Window
         Activate(point.X < Sheet.PageWidth ? left : right);
     }
 
+    void AddFontItem(string name)
+    {
+        var item = new ComboBoxItem { Content = name, FontFamily = Sheet.InstalledFont(name), ToolTip = name };
+        fontItems.Add(name, item);
+        fonts.Items.Add(item);
+    }
+
+    static ComboBox MakeDropdown(double width)
+    {
+        return new ComboBox {
+            Width = width, Height = 34, MaxDropDownHeight = 420,
+            Background = ButtonFill, Foreground = Cream, BorderBrush = DropdownBorder,
+            BorderThickness = new Thickness(1), VerticalContentAlignment = VerticalAlignment.Center,
+            Template = DropdownTemplate, ItemContainerStyle = DropdownItemStyle
+        };
+    }
+
+    static ComboBoxItem InkColorItem(KeyValuePair<string, string> choice)
+    {
+        var label = new StackPanel { Orientation = Orientation.Horizontal };
+        label.Children.Add(new Border {
+            Width = 12, Height = 12, CornerRadius = new CornerRadius(6),
+            Background = Palette.Brush(choice.Value ?? InkPalette.DefaultText), Margin = new Thickness(0, 0, 6, 0),
+            BorderBrush = Palette.Brush("#B8FFFFFF"), BorderThickness = new Thickness(1)
+        });
+        label.Children.Add(new TextBlock { Text = choice.Key });
+        var item = new ComboBoxItem { Content = label };
+        System.Windows.Automation.AutomationProperties.SetName(item, choice.Key);
+        return item;
+    }
+
     void Activate(Sheet sheet)
     {
         active = sheet;
@@ -1060,21 +1288,39 @@ sealed class NotebookWindow : Window
             book.RightPage = rightPage;
             MarkDirty();
         }
-        syncingFont = true;
-        fonts.SelectedIndex = Array.IndexOf(Sheet.Fonts, active.Data.Font);
-        syncingFont = false;
+        syncingTools = true;
+        ComboBoxItem item;
+        if (!fontItems.TryGetValue(active.Data.Font, out item))
+        {
+            missingFont.Content = active.Data.Font + " (nincs telepítve)";
+            item = missingFont;
+        }
+        fonts.SelectedItem = item;
+        fonts.ToolTip = item == missingFont ? missingFont.Content : null;
+        inkColors.SelectedIndex = InkPalette.IndexOf(active.Data.InkColor);
+        spreadInk.DefaultDrawingAttributes.Color = InkPalette.PenColor(active.Data.InkColor);
+        syncingTools = false;
         fontCaption.Text = (book.Position + (rightPage ? 2 : 1)) + ". oldal · Betűtípus";
     }
 
     void FontChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (syncingFont || active == null || fonts.SelectedIndex < 0) return;
-        if (!active.SetFont(Sheet.Fonts[fonts.SelectedIndex]))
+        var item = fonts.SelectedItem as ComboBoxItem;
+        if (syncingTools || active == null || item == null || item == missingFont) return;
+        if (!active.SetFont((string)item.Content))
         {
             Activate(active);
             status.Text = "Ezzel a betűtípussal nem fér el a szöveg.";
         }
-        if (mode == InkCanvasEditingMode.None) active.Editor.Focus();
+        else fonts.ToolTip = null;
+    }
+
+    void InkColorChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (syncingTools || active == null || inkColors.SelectedIndex < 0) return;
+        string color = InkPalette.Choices[inkColors.SelectedIndex].Value;
+        active.SetInkColor(color);
+        spreadInk.DefaultDrawingAttributes.Color = InkPalette.PenColor(color);
     }
 
     void SetMode(InkCanvasEditingMode value)
@@ -1107,7 +1353,7 @@ sealed class NotebookWindow : Window
             (book.Position + 2 < book.Pages.Count || book.Pages.Count < Storage.MaxPages);
         next.Content = book.Position + 2 == book.Pages.Count ? "Új lap  +" : "Következő  ›";
         import.IsEnabled = export.IsEnabled = idle;
-        type.IsEnabled = pen.IsEnabled = eraser.IsEnabled = fonts.IsEnabled = closeCover.IsEnabled = editable;
+        type.IsEnabled = pen.IsEnabled = eraser.IsEnabled = fonts.IsEnabled = inkColors.IsEnabled = closeCover.IsEnabled = editable;
         toolbar.Visibility = pager.Visibility = closeCover.Visibility = isOpen ? Visibility.Visible : Visibility.Hidden;
         coverPanel.Visibility = openingHint.Visibility = idle && !isOpen ? Visibility.Visible : Visibility.Hidden;
         spread.IsEnabled = spread.IsHitTestVisible = editable;
