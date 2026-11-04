@@ -1,0 +1,2 @@
+# The C# files are embedded byte-for-byte in the executables.
+*.cs -text
