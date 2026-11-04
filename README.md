@@ -31,3 +31,7 @@ A fordításhoz Windows, a Windows részeként elérhető .NET Framework 4.x és
 Mindkét EXE a `dist` mappába kerül. Az eredeti kiadás a .NET SDK 8.0.427-es fordítójával készült.
 
 A borítók vizuális mintái a Fűzfői Papírmanufaktúra [Harmónia 14–32 vonalas](https://fuzet.arukereso.hu/fuzfoi-papirmanufaktura/harmonia-a-5-1-osztalyos-32-lapos-vonalas-fuzet-1432000urg-p982535742/) és [Harmónia 27–32 kockás](https://www.jatekshop.eu/harmonia-kockas-fuzet-a5-27-32-22506.html/hun) füzetei.
+
+## Licenc
+
+Mindkét alkalmazás az [MIT licenc](LICENSE) alatt érhető el.
