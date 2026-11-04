@@ -21,7 +21,7 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Vonalas füzet")]
 [assembly: AssemblyDescription("Magyar, lapozható digitális jegyzetfüzet")]
 [assembly: AssemblyProduct("Vonalas füzet")]
-[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
 
 [DataContract]
 sealed class Notebook
@@ -168,12 +168,13 @@ sealed class Sheet : Grid
     };
 
     public readonly RichTextBox Editor;
-    readonly InkCanvas ink;
+    readonly InkPresenter ink;
     readonly Canvas paper = new Canvas();
     readonly bool isLeft;
     bool updating;
     bool rejecting;
     public PageData Data { get; private set; }
+    public StrokeCollection Ink { get { return ink.Strokes; } }
     public event Action<Sheet> Activated;
     public event Action Changed;
     public event Action Full;
@@ -223,14 +224,9 @@ sealed class Sheet : Grid
         DataObject.AddPastingHandler(Editor, PasteText);
         Children.Add(Editor);
 
-        ink = new InkCanvas { Background = Brushes.Transparent };
-        ink.DefaultDrawingAttributes.Color = Palette.Color("#223F70");
-        ink.DefaultDrawingAttributes.Width = 2.5;
-        ink.DefaultDrawingAttributes.Height = 2.5;
-        ink.PreviewMouseDown += delegate { if (Activated != null) Activated(this); };
-        ink.PreviewStylusDown += delegate { if (Activated != null) Activated(this); };
+        // The spread draws live ink. This presenter draws the page's ink for its animation texture.
+        ink = new InkPresenter { IsHitTestVisible = false, Opacity = 0 };
         Children.Add(ink);
-        SetMode(InkCanvasEditingMode.None);
     }
 
     static void PasteText(object sender, DataObjectPastingEventArgs e)
@@ -314,12 +310,10 @@ sealed class Sheet : Grid
         updating = true;
         try
         {
-            if (Data != null) ink.Strokes.StrokesChanged -= InkChanged;
             Data = data;
             Editor.Document = Document(data.Text, data.Font);
             Editor.ScrollToHome();
             ink.Strokes = Storage.ReadInk(data.Ink);
-            ink.Strokes.StrokesChanged += InkChanged;
             DrawPaper(number);
         }
         finally { updating = false; }
@@ -401,19 +395,10 @@ sealed class Sheet : Grid
         return true;
     }
 
-    void InkChanged(object sender, StrokeCollectionChangedEventArgs e)
+    public void SaveInk(StrokeCollection strokes)
     {
-        Data.Ink = Storage.WriteInk(ink.Strokes);
-        if (Changed != null) Changed();
-    }
-
-    public void SetMode(InkCanvasEditingMode mode)
-    {
-        ink.EditingMode = mode;
-        ink.EditingModeInverted = InkCanvasEditingMode.EraseByStroke;
-        ink.IsHitTestVisible = mode != InkCanvasEditingMode.None;
-        Editor.IsHitTestVisible = !ink.IsHitTestVisible;
-        Editor.IsTabStop = !ink.IsHitTestVisible;
+        ink.Strokes = strokes;
+        Data.Ink = Storage.WriteInk(strokes);
     }
 
     public BitmapSource Snapshot()
@@ -423,7 +408,14 @@ sealed class Sheet : Grid
         using (var dc = visual.RenderOpen())
             dc.DrawRectangle(new VisualBrush(this) { Stretch = Stretch.Fill }, null, bounds);
         var result = new RenderTargetBitmap(PageWidth * 2, PageHeight * 2, 192, 192, PixelFormats.Pbgra32);
-        result.Render(visual);
+        ink.Opacity = 1;
+        try
+        {
+            ink.Measure(bounds.Size);
+            ink.Arrange(bounds);
+            result.Render(visual);
+        }
+        finally { ink.Opacity = 0; }
         result.Freeze();
         return result;
     }
@@ -567,6 +559,9 @@ sealed class NotebookWindow : Window
     readonly Sheet right = new Sheet(false);
     readonly Grid bookArea = new Grid { Width = 2 * Sheet.PageWidth, Height = Sheet.PageHeight };
     readonly Grid spread = new Grid();
+    readonly InkCanvas spreadInk = new InkCanvas { Background = Brushes.Transparent, ClipToBounds = true };
+    static readonly Matrix ToRightPage = new Matrix(1, 0, 0, 1, -Sheet.PageWidth, 0);
+    static readonly Matrix FromRightPage = new Matrix(1, 0, 0, 1, Sheet.PageWidth, 0);
     readonly TextBlock status = Label("", 12, Muted);
     readonly TextBlock pageCounter = Label("", 13, Cream);
     readonly TextBlock fontCaption = Label("", 11, Muted);
@@ -687,6 +682,16 @@ sealed class NotebookWindow : Window
         right.HorizontalAlignment = HorizontalAlignment.Right;
         spread.Children.Add(left);
         spread.Children.Add(right);
+        spreadInk.DefaultDrawingAttributes.Color = Palette.Color("#223F70");
+        spreadInk.DefaultDrawingAttributes.Width = spreadInk.DefaultDrawingAttributes.Height = 2.5;
+        spreadInk.EditingModeInverted = InkCanvasEditingMode.EraseByStroke;
+        spreadInk.PreviewMouseDown += delegate(object sender, MouseButtonEventArgs e) {
+            if (e.ChangedButton == MouseButton.Left) ActivateInkPage(e.GetPosition(spreadInk));
+        };
+        spreadInk.PreviewStylusDown += delegate(object sender, StylusDownEventArgs e) {
+            ActivateInkPage(e.GetPosition(spreadInk));
+        };
+        spread.Children.Add(spreadInk);
         leftEdge = MakePageEdge(-1);
         rightEdge = MakePageEdge(1);
         spread.Children.Add(leftEdge);
@@ -955,8 +960,90 @@ sealed class NotebookWindow : Window
     {
         left.Load(book.Pages[book.Position], book.Position + 1);
         right.Load(book.Pages[book.Position + 1], book.Position + 2);
+        LoadSpreadInk();
         Activate(book.RightPage ? right : left);
         RefreshNavigation();
+    }
+
+    void LoadSpreadInk()
+    {
+        var strokes = new StrokeCollection();
+        foreach (var stroke in left.Ink) SplitInk(stroke, strokes, null);
+        foreach (var stroke in right.Ink)
+        {
+            var shifted = stroke.Clone();
+            shifted.Transform(FromRightPage, false);
+            SplitInk(shifted, null, strokes);
+        }
+        spreadInk.Strokes.StrokesChanged -= SpreadInkChanged;
+        spreadInk.Strokes = strokes;
+        spreadInk.Strokes.StrokesChanged += SpreadInkChanged;
+    }
+
+    static void SplitInk(Stroke stroke, StrokeCollection leftStrokes, StrokeCollection rightStrokes)
+    {
+        Rect bounds = stroke.GetBounds();
+        if (bounds.Right < Sheet.PageWidth)
+        {
+            if (leftStrokes != null) leftStrokes.Add(stroke.Clone());
+            return;
+        }
+        if (bounds.Left >= Sheet.PageWidth)
+        {
+            if (rightStrokes != null) rightStrokes.Add(stroke.Clone());
+            return;
+        }
+
+        var points = stroke.StylusPoints;
+        StylusPoint previous = points[0];
+        bool onRight = previous.X >= Sheet.PageWidth;
+        var part = new StylusPointCollection(points.Description) { previous };
+        for (int i = 1; i < points.Count; i++)
+        {
+            StylusPoint point = points[i];
+            bool nextOnRight = point.X >= Sheet.PageWidth;
+            if (nextOnRight != onRight)
+            {
+                // Both page fragments reach the same point at the spine, including on diagonal strokes.
+                double fraction = (Sheet.PageWidth - previous.X) / (point.X - previous.X);
+                var seam = previous;
+                seam.X = Sheet.PageWidth;
+                seam.Y += fraction * (point.Y - previous.Y);
+                seam.PressureFactor += (float)(fraction * (point.PressureFactor - previous.PressureFactor));
+                if (previous.X != seam.X) part.Add(seam);
+                AddInkPart(stroke, part, onRight ? rightStrokes : leftStrokes);
+                part = new StylusPointCollection(points.Description);
+                if (point.X != seam.X) part.Add(seam);
+                onRight = nextOnRight;
+            }
+            part.Add(point);
+            previous = point;
+        }
+        AddInkPart(stroke, part, onRight ? rightStrokes : leftStrokes);
+    }
+
+    static void AddInkPart(Stroke original, StylusPointCollection points, StrokeCollection destination)
+    {
+        if (destination == null) return;
+        var part = original.Clone();
+        part.StylusPoints = points;
+        destination.Add(part);
+    }
+
+    void SpreadInkChanged(object sender, StrokeCollectionChangedEventArgs e)
+    {
+        var leftStrokes = new StrokeCollection();
+        var rightStrokes = new StrokeCollection();
+        foreach (var stroke in spreadInk.Strokes) SplitInk(stroke, leftStrokes, rightStrokes);
+        rightStrokes.Transform(ToRightPage, false);
+        left.SaveInk(leftStrokes);
+        right.SaveInk(rightStrokes);
+        MarkDirty();
+    }
+
+    void ActivateInkPage(Point point)
+    {
+        Activate(point.X < Sheet.PageWidth ? left : right);
     }
 
     void Activate(Sheet sheet)
@@ -991,8 +1078,11 @@ sealed class NotebookWindow : Window
         type.Background = value == InkCanvasEditingMode.None ? Accent : ButtonFill;
         pen.Background = value == InkCanvasEditingMode.Ink ? Accent : ButtonFill;
         eraser.Background = value == InkCanvasEditingMode.EraseByStroke ? Accent : ButtonFill;
-        left.SetMode(value);
-        right.SetMode(value);
+        spreadInk.EditingMode = value;
+        bool typing = value == InkCanvasEditingMode.None;
+        spreadInk.IsHitTestVisible = !typing;
+        left.Editor.IsHitTestVisible = left.Editor.IsTabStop = typing;
+        right.Editor.IsHitTestVisible = right.Editor.IsTabStop = typing;
         if (IsLoaded && isOpen && value == InkCanvasEditingMode.None) active.Editor.Focus();
     }
 
@@ -1025,7 +1115,8 @@ sealed class NotebookWindow : Window
 
     bool IsWriting()
     {
-        return (Mouse.Captured != null && (left.IsMouseCaptureWithin || right.IsMouseCaptureWithin)) ||
+        return spreadInk.IsMouseCaptureWithin || spreadInk.IsStylusCaptureWithin ||
+               (Mouse.Captured != null && (left.IsMouseCaptureWithin || right.IsMouseCaptureWithin)) ||
                (Stylus.Captured != null && (left.IsStylusCaptureWithin || right.IsStylusCaptureWithin));
     }
 
